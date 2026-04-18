@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  
+  --color-brand-emerald: #10b981;
+  --color-brand-emerald-dark: #059669;
+  
+  --color-background: #020617;
+  --color-foreground: #f8fafc;
+}
+
+:root {
+  --background: #020617;
+  --foreground: #f8fafc;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .glass-card {
+    @apply bg-slate-900/60 backdrop-blur-md border border-slate-800 shadow-xl rounded-2xl;
+  }
+  .input-field {
+    @apply w-full bg-slate-950 border border-slate-800 text-white placeholder-slate-500 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-brand-emerald focus:border-transparent transition duration-200;
+  }
+  .btn-primary {
+    @apply flex items-center justify-center gap-2 bg-brand-emerald hover:bg-brand-emerald-dark text-white font-semibold py-3 px-6 rounded-xl transition duration-200 shadow-[0_0_15px_rgba(16,185,129,0.3)] hover:shadow-[0_0_25px_rgba(16,185,129,0.5)];
+  }
+  .btn-secondary {
+    @apply flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3 px-6 rounded-xl transition duration-200;
+  }
+  .animate-marquee {
+    animation: marquee 40s linear infinite;
+  }
+}
+
+@keyframes marquee {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
