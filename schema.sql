@@ -860,6 +860,22 @@ CREATE TABLE AutoPay (
     CONSTRAINT fk_autopay_account FOREIGN KEY (account_id) REFERENCES Accounts(account_id) ON DELETE CASCADE
 );
 
+-- 4. New Table: Fixed Deposits
+CREATE TABLE Fixed_Deposits (
+    fd_id                INT             AUTO_INCREMENT KEY,
+    account_id           INT             NOT NULL,
+    principal_amount     DECIMAL(15,2)   NOT NULL CHECK (principal_amount > 0),
+    interest_rate        DECIMAL(5,2)    NOT NULL,
+    tenure_months        INT             NOT NULL CHECK (tenure_months > 0),
+    maturity_amount      DECIMAL(15,2)   NOT NULL,
+    maturity_date        DATE            NOT NULL,
+    maturity_instruction ENUM('Auto-Renew', 'Credit to Savings') DEFAULT 'Credit to Savings',
+    nominee_name         VARCHAR(100)    DEFAULT NULL,
+    status               ENUM('Active', 'Closed') DEFAULT 'Active',
+    created_at           DATETIME        DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_fd_account FOREIGN KEY (account_id) REFERENCES Accounts(account_id) ON DELETE CASCADE
+);
+
 -- SEED LOANS AND AUTOPAY
 INSERT INTO Loans (account_id, total_amount, emi_amount, remaining_amount, next_due_date, status) VALUES 
 (@acc1, 500000.00, 15000.00, 450000.00, DATE_ADD(CURRENT_DATE, INTERVAL 2 DAY), 'Active'), -- Payment due soon
