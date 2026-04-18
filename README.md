@@ -254,15 +254,7 @@ App will be available at: `http://localhost:3000`
 | PUT | `/api/admin/loans/approve/{id}` | Activate loan |
 | PUT | `/api/admin/kyc/{customer_id}` | Approve KYC |
 
----
 
-## 👥 Team
-
-**Course:** Database Management Systems  
-**Institution:** (Your College Name)  
-**Semester:** (Your Semester)
-
----
 
 ## 📄 License
 
