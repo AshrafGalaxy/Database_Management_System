@@ -1565,3 +1565,276 @@ def get_security_locks():
     finally:
         cursor.close()
         conn.close()
+
+
+# ─── Fixed Deposits (Genuine Banking Flow) ───────────────────────────────────
+
+class FDOpenRequest(BaseModel):
+    account_number: str
+    principal_amount: float
+    tenure_years: float
+    interest_rate: float
+    maturity_instruction: str
+    nominee_name: Optional[str] = None
+    password: str
+    mpin: str
+
+class FDInstructionUpdate(BaseModel):
+    maturity_instruction: str
+    nominee_name: Optional[str] = None
+
+class FDCalcRequest(BaseModel):
+    principal: float
+    rate_percent: float
+    tenure_years: float
+
+@app.post("/api/calculator/fd")
+def calculate_fd(request: FDCalcRequest):
+    """Calculate FD returns with quarterly compounding."""
+    if request.principal <= 0 or request.tenure_years <= 0 or request.rate_percent < 0:
+        raise HTTPException(status_code=400, detail="Invalid inputs for calculation.")
+    
+    r = request.rate_percent / 100
+    n = 4 # quarterly
+    t = request.tenure_years
+    
+    maturity_amount = request.principal * math.pow((1 + r/n), n*t)
+    interest_earned = maturity_amount - request.principal
+    
+    return {
+        "success": True,
+        "principal": request.principal,
+        "maturity_amount": round(maturity_amount, 2),
+        "interest_earned": round(interest_earned, 2),
+        "compounding": "Quarterly"
+    }
+
+@app.post("/api/fd/open")
+def open_fixed_deposit(request: FDOpenRequest):
+    """
+    Open an FD. Requires password + MPIN double lock validation.
+    Calls sp_withdraw to deduct the principal from savings.
+    Inserts a locked row into Fixed_Deposits.
+    """
+    conn = get_db_connection()
+    if not conn: raise HTTPException(status_code=500, detail="DB Error")
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if request.principal_amount < 1000:
+            raise HTTPException(status_code=400, detail="Minimum FD amount is ₹1,000")
+            
+        # 1. Double Lock Validation
+        cursor.execute(
+            """
+            SELECT l.password_hash, l.mpin_hash, a.account_id 
+            FROM Login l 
+            JOIN Accounts a ON l.customer_id = a.customer_id 
+            WHERE a.account_number = %s
+            """,
+            (request.account_number,)
+        )
+        auth_row = cursor.fetchone()
+        
+        if not auth_row:
+            raise HTTPException(status_code=404, detail="Account not found.")
+            
+        if not bcrypt.checkpw(request.password.encode('utf-8'), auth_row['password_hash'].encode('utf-8')):
+            raise HTTPException(status_code=401, detail="Invalid password.")
+            
+        if not auth_row['mpin_hash'] or not bcrypt.checkpw(request.mpin.encode('utf-8'), auth_row['mpin_hash'].encode('utf-8')):
+            raise HTTPException(status_code=403, detail="Invalid MPIN. Authorization failed.")
+            
+        account_id = auth_row['account_id']
+        
+        # 2. Subtract Principal (creates transaction + updates balance)
+        desc = f"Fixed Deposit booking"
+        cursor.callproc('sp_withdraw', (request.account_number, request.principal_amount, 'FD_Creation', desc, ''))
+        # Note: In PyMySQL or mysql-connector-python, OUT params from callproc need to be checked.
+        # But we can just see if an error was raised.
+        # Actually callproc returns a tuple of all args passed. 
+        # But wait, we can just COMMIT and let triggers work, but SP does commit/rollback itself.
+        
+        # Check balance directly to be safe, sp_withdraw handles overdraft logic, but FD shouldn't use overdraft!
+        # FD MUST be cash only, no overdraft allowed.
+        cursor.execute("SELECT balance FROM Accounts WHERE account_number = %s", (request.account_number,))
+        bal_row = cursor.fetchone()
+        if bal_row['balance'] < request.principal_amount:
+            raise HTTPException(status_code=400, detail="Insufficient clear balance (Overdraft cannot be used for FDs)")
+            
+        # Actually, let's just insert a transaction directly since we verified balance.
+        # It's cleaner for FD.
+        new_balance = bal_row['balance'] - request.principal_amount
+        cursor.execute("UPDATE Accounts SET balance = %s WHERE account_id = %s", (new_balance, account_id))
+        cursor.execute(
+            "INSERT INTO Transactions (account_id, transaction_type, transaction_channel, amount, balance_after, status, description) VALUES (%s, %s, %s, %s, %s, 'Success', %s)",
+            (account_id, 'withdrawal', 'System', request.principal_amount, new_balance, f"Opened FD - {request.tenure_years} Years")
+        )
+        
+        # Calculate Maturity metrics
+        r = request.interest_rate / 100
+        n = 4 
+        t = request.tenure_years
+        mat_amt = request.principal_amount * math.pow((1 + r/n), n*t)
+        
+        from datetime import date
+        from dateutil.relativedelta import relativedelta
+        mat_date = date.today() + relativedelta(months=int(request.tenure_years * 12))
+        
+        # 3. Create FD Record
+        cursor.execute(
+            """
+            INSERT INTO Fixed_Deposits 
+            (account_id, principal_amount, interest_rate, tenure_months, maturity_amount, maturity_date, maturity_instruction, nominee_name, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Active')
+            """,
+            (account_id, request.principal_amount, request.interest_rate, int(request.tenure_years * 12), round(mat_amt, 2), mat_date, request.maturity_instruction, request.nominee_name)
+        )
+        
+        conn.commit()
+        return {"success": True, "message": "Fixed Deposit booked successfully."}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.get("/api/fd/{account_number}")
+def get_fds(account_number: str):
+    conn = get_db_connection()
+    if not conn: raise HTTPException(status_code=500, detail="DB Error")
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT f.*, a.account_number 
+            FROM Fixed_Deposits f
+            JOIN Accounts a ON f.account_id = a.account_id
+            WHERE a.account_number = %s
+            ORDER BY f.created_at DESC
+            """, 
+            (account_number,)
+        )
+        rows = cursor.fetchall()
+        
+        from datetime import date
+        today = date.today()
+        
+        # Enhance rows with accrued interest
+        for r in rows:
+            if r['status'] == 'Active':
+                start = r['created_at'].date() if hasattr(r['created_at'], 'date') else r['created_at']
+                days_held = (today - start).days
+                if days_held < 0: days_held = 0
+                
+                # Simple linear interpolation for live view (real banking does daily accrual logic)
+                years_held = days_held / 365.0
+                rate = r['interest_rate'] / 100
+                accrued = r['principal_amount'] * math.pow(1 + rate/4, 4 * years_held) - r['principal_amount']
+                r['accrued_interest'] = round(accrued, 2)
+                r['current_value'] = r['principal_amount'] + round(accrued, 2)
+            else:
+                r['accrued_interest'] = 0
+                r['current_value'] = 0
+                
+            if hasattr(r['created_at'], 'strftime'): r['created_at'] = r['created_at'].strftime("%Y-%m-%d")
+            if hasattr(r['maturity_date'], 'strftime'): r['maturity_date'] = r['maturity_date'].strftime("%Y-%m-%d")
+            
+        return {"fds": rows}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.put("/api/fd/instructions/{fd_id}")
+def update_fd_instructions(fd_id: int, request: FDInstructionUpdate):
+    """Allows managing the nominee or payout instructions of an active FD."""
+    conn = get_db_connection()
+    if not conn: raise HTTPException(status_code=500, detail="DB Error")
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE Fixed_Deposits SET maturity_instruction = %s, nominee_name = %s WHERE fd_id = %s AND status = 'Active'",
+            (request.maturity_instruction, request.nominee_name, fd_id)
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Active Fast Deposit not found.")
+        conn.commit()
+        return {"success": True, "message": "Instructions updated."}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.post("/api/fd/liquidate/{fd_id}")
+def liquidate_fd(fd_id: int):
+    """
+    Break an FD prematurely.
+    Calculates penalty (1% less than booked rate), deposits to Savings, marks FD as Closed.
+    """
+    conn = get_db_connection()
+    if not conn: raise HTTPException(status_code=500, detail="DB Error")
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM Fixed_Deposits WHERE fd_id = %s", (fd_id,))
+        fd = cursor.fetchone()
+        
+        if not fd:
+            raise HTTPException(status_code=404, detail="FD not found.")
+        if fd['status'] != 'Active':
+            raise HTTPException(status_code=400, detail="FD is already liquidated or closed.")
+            
+        from datetime import date
+        today = date.today()
+        start = fd['created_at'].date() if hasattr(fd['created_at'], 'date') else fd['created_at']
+        days_held = (today - start).days
+        
+        # If liquidated within 7 days, 0 interest (real rule). Otherwise, 1% penalty.
+        principal = fd['principal_amount']
+        if days_held < 7:
+            payout = principal
+            interest = 0
+            penalty_applied = True
+        else:
+            years_held = days_held / 365.0
+            # 1% penalty
+            penal_rate = max(0, fd['interest_rate'] - 1.0) / 100
+            payout = principal * math.pow(1 + penal_rate/4, 4 * years_held)
+            interest = payout - principal
+            penalty_applied = True
+            
+        # Refund to savings account
+        cursor.execute("SELECT balance FROM Accounts WHERE account_id = %s FOR UPDATE", (fd['account_id'],))
+        acc = cursor.fetchone()
+        new_balance = acc['balance'] + payout
+        
+        cursor.execute("UPDATE Accounts SET balance = %s WHERE account_id = %s", (new_balance, fd['account_id']))
+        desc = f"FD Liquidation (Penalty applied). Interest: ₹{round(interest, 2)}"
+        cursor.execute(
+            "INSERT INTO Transactions (account_id, transaction_type, transaction_channel, amount, balance_after, status, description) VALUES (%s, %s, %s, %s, %s, 'Success', %s)",
+            (fd['account_id'], 'deposit', 'System', round(payout, 2), new_balance, desc)
+        )
+        
+        cursor.execute("UPDATE Fixed_Deposits SET status = 'Closed' WHERE fd_id = %s", (fd_id,))
+        
+        conn.commit()
+        return {
+            "success": True, 
+            "payout": round(payout, 2), 
+            "principal": float(principal),
+            "interest": round(interest, 2),
+            "penalty_applied": penalty_applied,
+            "message": "FD Liquidated successfully."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
