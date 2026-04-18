@@ -1647,13 +1647,6 @@ def open_fixed_deposit(request: FDOpenRequest):
         account_id = auth_row['account_id']
         
         # 2. Subtract Principal (creates transaction + updates balance)
-        desc = f"Fixed Deposit booking"
-        cursor.callproc('sp_withdraw', (request.account_number, request.principal_amount, 'FD_Creation', desc, ''))
-        # Note: In PyMySQL or mysql-connector-python, OUT params from callproc need to be checked.
-        # But we can just see if an error was raised.
-        # Actually callproc returns a tuple of all args passed. 
-        # But wait, we can just COMMIT and let triggers work, but SP does commit/rollback itself.
-        
         # Check balance directly to be safe, sp_withdraw handles overdraft logic, but FD shouldn't use overdraft!
         # FD MUST be cash only, no overdraft allowed.
         cursor.execute("SELECT balance FROM Accounts WHERE account_number = %s", (request.account_number,))
