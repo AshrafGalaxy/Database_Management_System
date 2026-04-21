@@ -204,6 +204,20 @@ def get_branches():
         cursor.close()
         conn.close()
 
+@app.get("/api/check-username/{username}")
+def check_username_availability(username: str):
+    """Real-time username availability check for registration form."""
+    conn = get_db_connection()
+    if not conn: raise HTTPException(status_code=500, detail="DB Error")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT 1 FROM Login WHERE username = %s LIMIT 1", (username,))
+        taken = cursor.fetchone() is not None
+        return {"available": not taken, "username": username}
+    finally:
+        cursor.close()
+        conn.close()
+
 @app.post("/api/login")
 def login(request: LoginRequest):
     conn = get_db_connection()
@@ -389,7 +403,7 @@ def transfer_funds(request: TransferRequest):
 
         # --- DOUBLE-LOCK AUTH: Verify MPIN before any transfer ---
         cursor.execute(
-            "SELECT l.mpin_hash FROM Login l "
+            "SELECT l.mpin_hash, l.customer_id FROM Login l "
             "JOIN Accounts a ON l.customer_id = a.customer_id "
             "WHERE a.account_number = %s",
             (request.sender_account,)
@@ -400,10 +414,46 @@ def transfer_funds(request: TransferRequest):
         if not bcrypt.checkpw(request.mpin.encode('utf-8'), login_row['mpin_hash'].encode('utf-8')):
             raise HTTPException(status_code=403, detail="Authentication Failed: Invalid Transaction PIN (MPIN).")
 
+        sender_customer_id = login_row['customer_id']
+
+        # --- RBI BENEFICIARY & COOLING PERIOD ENFORCEMENT ---
+        # Rule 1: Receiver must be in sender's Saved_Beneficiaries.
+        # Rule 2: If cooling_period_active (added < 24hrs ago) AND amount > 10,000 → block.
+        # The cooling re-triggers on every re-add (based on added_at timestamp).
+        cursor.execute(
+            """
+            SELECT beneficiary_id, nickname,
+                   TIMESTAMPDIFF(HOUR, added_at, NOW()) AS hours_since_added,
+                   CASE WHEN TIMESTAMPDIFF(HOUR, added_at, NOW()) < 24 THEN TRUE ELSE FALSE END AS cooling_active,
+                   DATE_ADD(added_at, INTERVAL 24 HOUR) AS cooling_ends_at
+            FROM Saved_Beneficiaries
+            WHERE customer_id = %s AND payee_account_number = %s
+            """,
+            (sender_customer_id, request.receiver_account)
+        )
+        bene = cursor.fetchone()
+
+        if not bene:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Transfer blocked: Account '{request.receiver_account}' is not in your saved beneficiaries. "
+                       f"Please add them as a beneficiary first."
+            )
+
+        if bene['cooling_active'] and request.amount > 10000:
+            cooling_ends = bene['cooling_ends_at']
+            if hasattr(cooling_ends, 'strftime'):
+                cooling_ends_str = cooling_ends.strftime("%d %b %Y, %I:%M %p")
+            else:
+                cooling_ends_str = str(cooling_ends)
+            raise HTTPException(
+                status_code=403,
+                detail=f"RBI 24-hr cooling period active for '{bene['nickname']}'. "
+                       f"Max transfer: ₹10,000 until {cooling_ends_str}. "
+                       f"Transfers above ₹10,000 will be available after the cooling period ends."
+            )
+
         # --- TRANSFER ROUTING ENGINE ---
-        # > ₹2,00,000 = RTGS | ₹2,00,000 >= x > ₹2,00,00 (NEFT threshold) | else = IMPS
-        # This is stored in the DB via the transaction_channel; sp_transfer handles the rest.
-        # We surface routing_mode to the frontend for display purposes.
         if request.amount > 200000:
             routing_mode = "RTGS"
         elif request.amount > 10000:
