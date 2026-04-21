@@ -78,10 +78,13 @@ function TransferWizard({
   const [amount, setAmount] = useState("");
   const [mpin, setMpin] = useState("");
   const [loading, setLoading] = useState(false);
+  const [checkingBene, setCheckingBene] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [routingMode, setRoutingMode] = useState("");
+  const [beneWarning, setBeneWarning] = useState<{ nickname: string; cooling_active: boolean; cooling_ends_at: string | null } | null>(null);
 
+  const customerId = activeAccount?.customer_id;
   const amountNum = parseFloat(amount) || 0;
   const steps = ["Choose Payee", "Set Amount", "Authenticate"];
 
@@ -89,10 +92,38 @@ function TransferWizard({
     activeAccount?.account_type === "savings" && amountNum > 0 &&
     parseFloat(activeAccount.current_balance) - amountNum < parseFloat(activeAccount.min_balance);
 
-  const handleNext = () => {
+  // After user types receiver account and clicks Continue, lookup beneficiary status
+  const handleNext = async () => {
     setError(null);
     if (step === 0 && !receiverAccount.trim()) { setError("Please enter a destination account number."); return; }
     if (step === 0 && receiverAccount.trim() === accountNumber) { setError("Cannot transfer to your own account."); return; }
+
+    if (step === 0 && customerId) {
+      setCheckingBene(true);
+      try {
+        const res = await fetch(`http://127.0.0.1:8000/api/beneficiaries/${customerId}`);
+        const data = await res.json();
+        const benes: any[] = data.beneficiaries || [];
+        const match = benes.find((b: any) => b.payee_account_number === receiverAccount.trim());
+        if (!match) {
+          setError(`"${receiverAccount}" is not in your saved beneficiaries. Add them on the Beneficiaries page first.`);
+          setCheckingBene(false);
+          return;
+        }
+        // Store cooling status for the Amount step warning
+        setBeneWarning({
+          nickname: match.nickname,
+          cooling_active: !!match.cooling_period_active,
+          cooling_ends_at: match.cooling_ends_at || null,
+        });
+      } catch {
+        // Let backend handle it — proceed anyway
+        setBeneWarning(null);
+      } finally {
+        setCheckingBene(false);
+      }
+    }
+
     if (step === 1 && amountNum <= 0) { setError("Please enter a valid amount greater than ₹0."); return; }
     setStep((s) => s + 1);
   };
@@ -169,6 +200,16 @@ function TransferWizard({
       {/* Step 1: Amount */}
       {step === 1 && (
         <div className="space-y-4 animate-in fade-in slide-in-from-right-3 duration-200">
+          {/* Cooling period warning banner */}
+          {beneWarning?.cooling_active && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-xs">
+                <p className="text-amber-300 font-semibold mb-0.5">24-hr Cooling Period Active — {beneWarning.nickname}</p>
+                <p className="text-amber-500">Max transfer: <span className="text-amber-300 font-bold">₹10,000</span> right now. Transfers above ₹10,000 unlock after the cooling period ends.</p>
+              </div>
+            </div>
+          )}
           <div>
             <label className="text-xs font-medium text-slate-300 mb-1.5 block">Transfer Amount (₹) *</label>
             <div className="relative">
@@ -251,9 +292,9 @@ function TransferWizard({
           </button>
         )}
         {step < 2 ? (
-          <button onClick={handleNext}
-            className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold transition shadow-lg shadow-indigo-500/20">
-            Continue <ChevronRight className="w-4 h-4" />
+          <button onClick={handleNext} disabled={checkingBene}
+            className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-sm font-semibold transition shadow-lg shadow-indigo-500/20">
+            {checkingBene ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Verifying…</> : <>Continue <ChevronRight className="w-4 h-4" /></>}
           </button>
         ) : (
           <button onClick={handleSubmit} disabled={loading || mpin.length !== 6}
