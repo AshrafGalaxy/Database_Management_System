@@ -464,13 +464,14 @@ BEGIN
             COMMIT;
             SET p_result = 'ERROR: RBI Security Block. Payee is not in your Saved Beneficiaries.';
 
-        ELSEIF TIMESTAMPDIFF(HOUR, v_ben_added_at, NOW()) < 24 THEN
+        ELSEIF TIMESTAMPDIFF(HOUR, v_ben_added_at, NOW()) < 24 AND p_amount > 10000 THEN
+            -- RBI Rule: During 24-hr cooling, only IMPS-grade transfers (≤₹10,000) are allowed.
             INSERT INTO Transactions(account_id, transaction_type, transaction_channel,
                                      amount, balance_after, status, description)
             VALUES (v_sender_id, 'transfer_out', 'System', p_amount, v_s_balance,
-                    'Failed', 'Failed: 24-Hour Cooling Period Active');
+                    'Failed', 'Failed: 24-Hour Cooling Period — Max ₹10,000 for new beneficiary');
             COMMIT;
-            SET p_result = 'ERROR: RBI Security Block. 24-hour cooldown is active for this beneficiary.';
+            SET p_result = 'ERROR: RBI 24-hr cooling active. Transfers above ₹10,000 are locked for new beneficiaries. Max allowed: ₹10,000.';
 
         ELSE
             SELECT COALESCE(SUM(amount), 0) INTO v_daily_withdrawn
