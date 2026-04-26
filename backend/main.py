@@ -391,6 +391,38 @@ def get_nominees(account_number: str):
         cursor.close()
         conn.close()
 
+@app.get("/api/limits/{account_number}")
+def get_daily_limits(account_number: str):
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Fetch the total withdrawn today
+        query = """
+        SELECT COALESCE(SUM(amount), 0) as daily_withdrawn 
+        FROM Transactions t
+        JOIN Accounts a ON t.account_id = a.account_id
+        WHERE a.account_number = %s 
+          AND t.transaction_type IN ('withdrawal', 'transfer_out') 
+          AND t.status = 'Success' 
+          AND DATE(t.transaction_date) = CURRENT_DATE
+        """
+        cursor.execute(query, (account_number,))
+        res = cursor.fetchone()
+        withdrawn = float(res['daily_withdrawn']) if res else 0.0
+        
+        return {
+            "daily_limit": 100000.0,
+            "daily_withdrawn": withdrawn,
+            "remaining": max(0.0, 100000.0 - withdrawn)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
 @app.post("/api/transfer")
 def transfer_funds(request: TransferRequest):
     conn = get_db_connection()
@@ -399,27 +431,53 @@ def transfer_funds(request: TransferRequest):
     cursor = conn.cursor(dictionary=True)
     try:
         if request.amount <= 0:
-            raise HTTPException(status_code=400, detail="Amount must be positive")
+            raise HTTPException(status_code=400, detail=["Amount must be positive"])
 
         # --- DOUBLE-LOCK AUTH: Verify MPIN before any transfer ---
         cursor.execute(
-            "SELECT l.mpin_hash, l.customer_id FROM Login l "
+            "SELECT l.mpin_hash, l.customer_id, a.account_id, a.balance, a.min_balance, a.overdraft_limit, a.account_type "
+            "FROM Login l "
             "JOIN Accounts a ON l.customer_id = a.customer_id "
             "WHERE a.account_number = %s",
             (request.sender_account,)
         )
-        login_row = cursor.fetchone()
-        if not login_row or not login_row['mpin_hash']:
-            raise HTTPException(status_code=403, detail="Transaction PIN not set. Please set your MPIN in profile settings before transferring.")
-        if not bcrypt.checkpw(request.mpin.encode('utf-8'), login_row['mpin_hash'].encode('utf-8')):
-            raise HTTPException(status_code=403, detail="Authentication Failed: Invalid Transaction PIN (MPIN).")
+        sender = cursor.fetchone()
+        if not sender or not sender['mpin_hash']:
+            raise HTTPException(status_code=403, detail=["Transaction PIN not set. Please set your MPIN in profile settings before transferring."])
+        if not bcrypt.checkpw(request.mpin.encode('utf-8'), sender['mpin_hash'].encode('utf-8')):
+            raise HTTPException(status_code=403, detail=["Authentication Failed: Invalid Transaction PIN (MPIN)."])
 
-        sender_customer_id = login_row['customer_id']
+        # Prepare for Error Aggregation
+        error_list = []
+        amount = float(request.amount)
+        balance = float(sender['balance'])
+        acc_type = sender['account_type']
+        overdraft = float(sender['overdraft_limit'])
 
-        # --- RBI BENEFICIARY & COOLING PERIOD ENFORCEMENT ---
-        # Rule 1: Receiver must be in sender's Saved_Beneficiaries.
-        # Rule 2: If cooling_period_active (added < 24hrs ago) AND amount > 10,000 → block.
-        # The cooling re-triggers on every re-add (based on added_at timestamp).
+        # 1. Balance Constraints Check
+        if acc_type == 'savings' and (balance - amount < 0):
+            error_list.append(f"Insufficient funds. Savings account hard floor is ₹0. Your balance is ₹{balance:,.2f}.")
+        elif acc_type == 'current' and (balance - amount < -overdraft):
+            error_list.append(f"Overdraft limit exceeded. Your current balance is ₹{balance:,.2f} and max OD is ₹{overdraft:,.2f}.")
+        elif acc_type == 'fixed' and balance < amount:
+            error_list.append(f"Insufficient funds in fixed account. Your balance is ₹{balance:,.2f}.")
+
+        # 2. Daily Limit Check
+        cursor.execute(
+            "SELECT COALESCE(SUM(amount), 0) as daily_withdrawn "
+            "FROM Transactions WHERE account_id = %s "
+            "AND transaction_type IN ('withdrawal', 'transfer_out') "
+            "AND status = 'Success' AND DATE(transaction_date) = CURRENT_DATE",
+            (sender['account_id'],)
+        )
+        limit_row = cursor.fetchone()
+        daily_withdrawn = float(limit_row['daily_withdrawn']) if limit_row else 0.0
+
+        if daily_withdrawn + amount > 100000:
+            remaining = max(0.0, 100000 - daily_withdrawn)
+            error_list.append(f"Exceeds daily transfer limit of ₹100,000. Your remaining daily limit is ₹{remaining:,.2f}.")
+
+        # 3. RBI BENEFICIARY & COOLING PERIOD ENFORCEMENT
         cursor.execute(
             """
             SELECT beneficiary_id, nickname,
@@ -429,29 +487,20 @@ def transfer_funds(request: TransferRequest):
             FROM Saved_Beneficiaries
             WHERE customer_id = %s AND payee_account_number = %s
             """,
-            (sender_customer_id, request.receiver_account)
+            (sender['customer_id'], request.receiver_account)
         )
         bene = cursor.fetchone()
 
         if not bene:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Transfer blocked: Account '{request.receiver_account}' is not in your saved beneficiaries. "
-                       f"Please add them as a beneficiary first."
-            )
-
-        if bene['cooling_active'] and request.amount > 10000:
+            error_list.append(f"Transfer blocked: Account '{request.receiver_account}' is not in your saved beneficiaries.")
+        elif bene['cooling_active'] and amount > 10000:
             cooling_ends = bene['cooling_ends_at']
-            if hasattr(cooling_ends, 'strftime'):
-                cooling_ends_str = cooling_ends.strftime("%d %b %Y, %I:%M %p")
-            else:
-                cooling_ends_str = str(cooling_ends)
-            raise HTTPException(
-                status_code=403,
-                detail=f"RBI 24-hr cooling period active for '{bene['nickname']}'. "
-                       f"Max transfer: ₹10,000 until {cooling_ends_str}. "
-                       f"Transfers above ₹10,000 will be available after the cooling period ends."
-            )
+            cooling_ends_str = cooling_ends.strftime("%d %b %Y, %I:%M %p") if hasattr(cooling_ends, 'strftime') else str(cooling_ends)
+            error_list.append(f"RBI 24-hr cooling active for '{bene['nickname']}'. Max transfer is ₹10,000 until {cooling_ends_str}.")
+
+        # If any errors were aggregated, return them all together
+        if len(error_list) > 0:
+            raise HTTPException(status_code=400, detail=error_list)
 
         # --- TRANSFER ROUTING ENGINE ---
         if request.amount > 200000:

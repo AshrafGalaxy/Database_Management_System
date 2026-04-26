@@ -79,10 +79,23 @@ function TransferWizard({
   const [mpin, setMpin] = useState("");
   const [loading, setLoading] = useState(false);
   const [checkingBene, setCheckingBene] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | string[] | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [routingMode, setRoutingMode] = useState("");
   const [beneWarning, setBeneWarning] = useState<{ nickname: string; cooling_active: boolean; cooling_ends_at: string | null } | null>(null);
+  const [dailyLimit, setDailyLimit] = useState<{ daily_limit: number; daily_withdrawn: number; remaining: number } | null>(null);
+
+  // Fetch daily limits when wizard opens
+  useEffect(() => {
+    if (accountNumber) {
+      fetch(`http://127.0.0.1:8000/api/limits/${accountNumber}`)
+        .then(res => res.json())
+        .then(data => {
+           if (data.daily_limit) setDailyLimit(data);
+        })
+        .catch(console.error);
+    }
+  }, [accountNumber]);
 
   const customerId = activeAccount?.customer_id;
   const amountNum = parseFloat(amount) || 0;
@@ -124,7 +137,33 @@ function TransferWizard({
       }
     }
 
-    if (step === 1 && amountNum <= 0) { setError("Please enter a valid amount greater than ₹0."); return; }
+    if (step === 1) {
+      if (amountNum <= 0) {
+        setError("Please enter a valid amount greater than ₹0."); 
+        return;
+      }
+      
+      // Proactive Pre-Validation (No API call needed for balance)
+      let validationErrors = [];
+      if (activeAccount?.account_type === 'savings' && activeAccount?.current_balance && amountNum > parseFloat(activeAccount.current_balance)) {
+         validationErrors.push(`Insufficient funds. Your savings balance is ₹${parseFloat(activeAccount.current_balance).toLocaleString("en-IN")}.`);
+      }
+      if (activeAccount?.account_type === 'fixed' && activeAccount?.current_balance && amountNum > parseFloat(activeAccount.current_balance)) {
+         validationErrors.push(`Insufficient funds. Your fixed balance is ₹${parseFloat(activeAccount.current_balance).toLocaleString("en-IN")}.`);
+      }
+      if (activeAccount?.account_type === 'current' && activeAccount?.current_balance && activeAccount?.overdraft_limit) {
+         if (parseFloat(activeAccount.current_balance) - amountNum < -parseFloat(activeAccount.overdraft_limit)) {
+            validationErrors.push(`Overdraft limit exceeded. Max OD is ₹${parseFloat(activeAccount.overdraft_limit).toLocaleString("en-IN")}.`);
+         }
+      }
+      if (dailyLimit && amountNum > dailyLimit.remaining) {
+         validationErrors.push(`Amount exceeds your remaining daily limit of ₹${dailyLimit.remaining.toLocaleString("en-IN")}.`);
+      }
+      if (validationErrors.length > 0) {
+         setError(validationErrors);
+         return;
+      }
+    }
     setStep((s) => s + 1);
   };
 
@@ -144,12 +183,20 @@ function TransferWizard({
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Transfer failed");
+      if (!res.ok) {
+         // Pass array directly if it's an array, otherwise string
+         throw new Error(typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail));
+      }
       setRoutingMode(data.routing_mode || "");
       setSuccessMsg(data.message);
       setTimeout(() => { onSuccess(); onClose(); }, 2500);
     } catch (err: any) {
-      setError(err.message);
+      try {
+         const parsed = JSON.parse(err.message);
+         setError(Array.isArray(parsed) ? parsed : err.message);
+      } catch {
+         setError(err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -215,11 +262,27 @@ function TransferWizard({
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm font-semibold">₹</span>
               <input
-                type="number" min="1" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)}
+                type="number" min="1" step="0.01" value={amount} onChange={(e) => { setAmount(e.target.value); setError(null); }}
                 placeholder="0.00"
                 className="w-full bg-slate-900 border border-slate-700 text-white text-lg font-bold rounded-lg pl-7 pr-3 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
             </div>
+            {/* Daily Limit Progress Indicator */}
+            {dailyLimit && (
+              <div className="mt-3">
+                 <div className="flex justify-between text-[10px] text-slate-400 mb-1 font-medium uppercase tracking-wider">
+                    <span>Daily Limit Used</span>
+                    <span>₹{dailyLimit.daily_withdrawn.toLocaleString("en-IN")} / ₹{dailyLimit.daily_limit.toLocaleString("en-IN")}</span>
+                 </div>
+                 <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                    <div 
+                       className={`h-full transition-all duration-500 ${(dailyLimit.daily_withdrawn / dailyLimit.daily_limit) > 0.8 ? 'bg-amber-500' : 'bg-indigo-500'}`} 
+                       style={{ width: `${Math.min(100, (dailyLimit.daily_withdrawn / dailyLimit.daily_limit) * 100)}%` }} 
+                    />
+                 </div>
+                 <p className="text-[10px] text-emerald-400/80 mt-1">₹{dailyLimit.remaining.toLocaleString("en-IN")} remaining today</p>
+              </div>
+            )}
           </div>
 
           {amountNum > 0 && <RoutingBadge amount={amountNum} />}
@@ -276,10 +339,30 @@ function TransferWizard({
         </div>
       )}
 
-      {/* Error */}
+      {/* Aggregated Error Render */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 rounded-lg flex items-start gap-2 text-xs">
-          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><p>{error}</p>
+        <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3.5 rounded-xl flex items-start gap-2.5 text-xs shadow-lg shadow-red-500/5 animate-in slide-in-from-bottom-2">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="flex-1 space-y-1.5">
+            <span className="font-bold text-red-300 block mb-1 uppercase tracking-wider text-[10px]">Action Required</span>
+            {Array.isArray(error) ? (
+              <ul className="list-disc pl-4 space-y-1">
+                {error.map((err, idx) => <li key={idx}>{err}</li>)}
+              </ul>
+            ) : (
+              <p>{error}</p>
+            )}
+            
+            {/* Smart Fix-it Links */}
+            {JSON.stringify(error).includes("PIN not set") && (
+              <button onClick={onClose} className="bg-red-500/20 hover:bg-red-500/30 text-red-300 px-3 py-1.5 rounded-lg font-semibold mt-2 transition">
+                Go to Profile Settings &rarr;
+              </button>
+            )}
+            {JSON.stringify(error).includes("Insufficient funds") && (
+              <p className="text-red-300/80 italic mt-2">To complete this transaction, please deposit additional funds.</p>
+            )}
+          </div>
         </div>
       )}
 

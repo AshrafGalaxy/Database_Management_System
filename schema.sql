@@ -1,11 +1,25 @@
 -- ============================================================
 --   BANK MANAGEMENT SYSTEM — COMPLETE DATABASE SCHEMA
 -- ============================================================
+--   CONTRIBUTIONS:
+--   Ashraf: Backend API, Admin Analytics, DB Security/Auth (Login, Employees), and Automated DB Events.
+--   Prem: Core Banking Entities (Customers, Branches, Accounts, Nominees, AMB logic).
+--   Mangesh: Transactions, Payees, Transfers, and Dynamic Statements (Window Functions, Triggers).
+--   Ganesh: Value-Added Services (Cards, Loans, AutoPay, Fixed Deposits) and Cursor-based engines.
+-- ============================================================
 
+-- SQL CONCEPT: DDL (Data Definition Language) & Database Context
+-- INFO: Used to drop/create the database and ensure a fresh schema for isolated deployment.
 DROP DATABASE IF EXISTS bank_mgmt;
 CREATE DATABASE bank_mgmt;
 USE bank_mgmt;
 
+-- ============================================================
+-- SECTION: ACCOUNTS & CORE ENTITIES (Contributed by Prem)
+-- ============================================================
+
+-- SQL CONCEPT: Table Creation, Data Types & Primary Keys
+-- INFO: Customers table is the core entity (1st Normal Form). Uses AUTO_INCREMENT for surrogate primary keys and proper Data Types (DATE, VARCHAR).
 -- TABLE 1: Customers
 CREATE TABLE Customers (
     customer_id    INT          AUTO_INCREMENT PRIMARY KEY,
@@ -31,6 +45,12 @@ CREATE TABLE Branches (
     city          VARCHAR(50)  NOT NULL
 );
 
+-- ============================================================
+-- SECTION: PAYEE & PAYMENTS (Contributed by Mangesh)
+-- SQL CONCEPT: Cascade Constraints
+-- INFO: ON DELETE CASCADE ensures if a Customer is removed, their saved beneficiaries automatically drop to prevent orphan rows.
+-- ============================================================
+
 -- TABLE: Saved_Beneficiaries
 CREATE TABLE Saved_Beneficiaries (
     beneficiary_id       INT          AUTO_INCREMENT PRIMARY KEY,
@@ -44,6 +64,12 @@ CREATE TABLE Saved_Beneficiaries (
         ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- ============================================================
+-- SECTION: ACCOUNTS & BALANCES (Contributed by Prem)
+-- ============================================================
+
+-- SQL CONCEPT: Referential Integrity & ENUM Constraints
+-- INFO: Uses FOREIGN KEY constraints to maintain links to Customers/Branches. ENUMs restrict data to predefined valid states (Domain Integrity).
 -- TABLE 2: Accounts
 CREATE TABLE Accounts (
     account_id       INT            AUTO_INCREMENT PRIMARY KEY,
@@ -65,6 +91,8 @@ CREATE TABLE Accounts (
         ON DELETE RESTRICT ON UPDATE CASCADE
 );
 
+-- SQL CONCEPT: Indexing
+-- INFO: Creates a B-Tree index on account_number to massively speed up point lookups in queries and procedures.
 CREATE INDEX idx_account_number ON Accounts(account_number);
 
 -- TABLE: DailyBalanceSnapshots
@@ -80,6 +108,10 @@ CREATE TABLE DailyBalanceSnapshots (
         FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
         ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+-- ============================================================
+-- SECTION: CARD MANAGEMENT & LOANS (Contributed by Ganesh)
+-- ============================================================
 
 -- TABLE: Cards
 CREATE TABLE Cards (
@@ -118,6 +150,10 @@ CREATE TABLE Card_Requests (
         ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- ============================================================
+-- SECTION: NOMINEES (Contributed by Prem)
+-- ============================================================
+
 -- TABLE: Nominees
 
 CREATE TABLE Nominees (
@@ -130,6 +166,10 @@ CREATE TABLE Nominees (
         FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
         ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+-- ============================================================
+-- SECTION: TRANSACTIONS & TRANSFERS (Contributed by Mangesh)
+-- ============================================================
 
 -- TABLE 3: Transactions
 CREATE TABLE Transactions (
@@ -148,6 +188,12 @@ CREATE TABLE Transactions (
 );
 
 CREATE INDEX idx_txn_account ON Transactions(account_id);
+
+-- ============================================================
+-- SECTION: AUTHENTICATION & EMPLOYEES (Contributed by Ashraf)
+-- SQL CONCEPT: Relational Mapping & Data Security
+-- INFO: Securely separates authentication from user data (Normalization). Uses password hashes to preserve confidentiality.
+-- ============================================================
 
 -- TABLE 4: Employees
 CREATE TABLE Employees (
@@ -182,7 +228,11 @@ CREATE TABLE Login (
         ON DELETE SET NULL ON UPDATE CASCADE
 );
 
--- TRIGGER: Auto-update Account balance
+-- ============================================================
+-- TRIGGER: trg_update_balance 
+-- CONTRIBUTOR: Mangesh
+-- USED IN: Transactions tracking page; automatically balances the account whenever a new transaction is recorded via the API.
+-- ============================================================
 DELIMITER $$
 CREATE TRIGGER trg_update_balance
 AFTER INSERT ON Transactions
@@ -197,7 +247,16 @@ BEGIN
     END IF;
 END$$
 
+-- ✖️ END OF MANGESH'S TRIGGER CONTRIBUTION ✖️
+-- ============================================================
+
+-- ============================================================
 -- STORED PROCEDURE: sp_deposit
+-- CONTRIBUTOR: Mangesh
+-- USED IN: Instant transfers and external deposit handling API route
+-- ============================================================
+-- SQL CONCEPT: Stored Procedures & ACID Transactions (TCL)
+-- INFO: Encapsulates business logic natively. Uses START TRANSACTION, COMMIT, and ROLLBACK to ensure Atomicity. EXIT HANDLER manages error states natively.
 CREATE PROCEDURE sp_deposit(
     IN  p_account_number VARCHAR(20),
     IN  p_amount         DECIMAL(15,2),
@@ -233,7 +292,14 @@ BEGIN
     END IF;
 END$$
 
--- STORED PROCEDURE: sp_withdraw  (RBI-Compliant — no instant penalty)
+-- ✖️ END OF MANGESH'S SP_DEPOSIT CONTRIBUTION ✖️
+-- ============================================================
+
+-- ============================================================
+-- STORED PROCEDURE: sp_withdraw  (RBI-Compliant)
+-- CONTRIBUTOR: Mangesh
+-- USED IN: Instant transfers, ATM withdrawals, and checkout logic in frontend.
+-- ============================================================
 -- Hard floor: savings balance cannot go below ₹0.
 -- AMB penalty is collected monthly by sp_calculate_amb_penalties().
 CREATE PROCEDURE sp_withdraw(
@@ -360,7 +426,15 @@ BEGIN
         END IF;
     END IF;
 END$$
--- STORED PROCEDURE: sp_transfer  (RBI-Compliant — no instant penalty)
+
+-- ✖️ END OF MANGESH'S SP_WITHDRAW CONTRIBUTION ✖️
+-- ============================================================
+
+-- ============================================================
+-- STORED PROCEDURE: sp_transfer 
+-- CONTRIBUTOR: Mangesh
+-- USED IN: Instant Money Transfers page; dynamically checks NEFT/IMPS/RTGS rules and cooling periods.
+-- ============================================================
 -- Hard floor: savings sender cannot go below ₹0.
 -- Channel auto-selected: UPI / NEFT / RTGS based on amount.
 CREATE PROCEDURE sp_transfer(
@@ -560,9 +634,16 @@ BEGIN
 END$$
 DELIMITER ;
 
+-- ✖️ END OF MANGESH'S SP_TRANSFER CONTRIBUTION ✖️
+-- ============================================================
 
-
+-- ============================================================
 -- VIEW: vw_customer_account_summary
+-- CONTRIBUTOR: Prem
+-- USED IN: User Profile Page & Accounts Layout; loads the aggregated context of the customer on login.
+-- ============================================================
+-- SQL CONCEPT: Views
+-- INFO: A View acts as a virtual table. This abstracts complex JOINs into a single queryable entity, simplifying front-end dashboard calls.
 CREATE VIEW vw_customer_account_summary AS
 SELECT
     c.customer_id,
@@ -591,6 +672,9 @@ JOIN Accounts a ON a.customer_id = c.customer_id
 JOIN Branches b ON a.branch_id = b.branch_id
 LEFT JOIN Transactions t ON t.account_id = a.account_id
 GROUP BY c.customer_id, a.account_id;
+
+-- ✖️ END OF PREM'S VIEW CONTRIBUTION ✖️
+-- ============================================================
 
 -- SAMPLE DATA INSERTS
 INSERT INTO Customers (first_name, last_name, email, phone, address, date_of_birth, kyc_status, pan_number, aadhaar_number, aadhaar_linked, cif_number) VALUES
@@ -648,7 +732,11 @@ INSERT INTO Login (username, password_hash, role, customer_id, employee_id) VALU
 ('sneha_p', '$2b$12$du6VsjbmYpvBdSzspiN/TeTsHUt8qT6cqLb5nqG0dow5wSMQMuN.2', 'user', 4, NULL),
 ('vikram_s', '$2b$12$du6VsjbmYpvBdSzspiN/TeTsHUt8qT6cqLb5nqG0dow5wSMQMuN.2', 'user', 5, NULL);
 
+-- ============================================================
 -- VIEW: vw_admin_analytics
+-- CONTRIBUTOR: Ashraf (Backend Integration & System Aggregation)
+-- USED IN: Used fundamentally by the Admin Dashboard to fetch total bank volume liquidity, total tracking counts, without scanning individual entries dynamically.
+-- ============================================================
 CREATE VIEW vw_admin_analytics AS
 SELECT 
     (SELECT COALESCE(SUM(balance), 0) FROM Accounts WHERE status = 'active') AS total_bank_liquidity,
@@ -656,7 +744,16 @@ SELECT
     (SELECT COUNT(customer_id) FROM Customers WHERE kyc_status = 'Pending') AS pending_kyc_count,
     (SELECT COALESCE(SUM(amount), 0) FROM Transactions WHERE DATE(transaction_date) = CURRENT_DATE) AS total_transaction_volume;
 
--- STORED PROCEDURE: sp_get_account_statement (Dynamic Running Balance via Window Functions)
+-- ✖️ END OF ASHRAF'S ADMIN VIEW CONTRIBUTION ✖️
+-- ============================================================
+
+-- ============================================================
+-- STORED PROCEDURE: sp_get_account_statement 
+-- CONTRIBUTOR: Mangesh
+-- USED IN: Used in the Transactions layout table to calculate dynamic running balances over time without storing overhead. Used for PDF Statement generation. 
+-- ============================================================
+-- SQL CONCEPT: Window Functions & CTEs (Common Table Expressions)
+-- INFO: Uses WITH to create a temporary result set. The OVER(ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) computes a dynamic running balance effectively.
 DROP PROCEDURE IF EXISTS sp_get_account_statement;
 DELIMITER $$
 CREATE PROCEDURE sp_get_account_statement(
@@ -691,7 +788,14 @@ BEGIN
 END$$ 
 DELIMITER ;
 
--- VIEW: vw_account_cash_flow (Analytics Aggregations)
+-- ✖️ END OF MANGESH'S ACCOUNT STATEMENT contribution ✖️
+-- ============================================================
+
+-- ============================================================
+-- VIEW: vw_account_cash_flow
+-- CONTRIBUTOR: Mangesh
+-- USED IN: Analytics Panel/Chart dashboard layouts. Used purely mapping monthly income vs spending grouping.
+-- ============================================================
 DROP VIEW IF EXISTS vw_account_cash_flow;
 CREATE VIEW vw_account_cash_flow AS
 SELECT 
@@ -705,11 +809,17 @@ WHERE t.status = 'Success'
 GROUP BY a.account_number, DATE_FORMAT(t.transaction_date, '%Y-%m'), DATE_FORMAT(t.transaction_date, '%b %Y')
 ORDER BY DATE_FORMAT(t.transaction_date, '%Y-%m') ASC;
 
+-- ✖️ END OF MANGESH'S DASHBOARD ANALYTICS VIEW CONTRIBUTION ✖️
+-- ============================================================
+
 -- 1. Enable Native Event Scheduler
 SET GLOBAL event_scheduler = ON;
 
--- STORED PROCEDURE: sp_record_daily_snapshots
--- Called nightly to capture each account's closing balance for AMB tracking.
+-- ============================================================
+-- STORED PROCEDURE: sp_record_daily_snapshots 
+-- CONTRIBUTOR: Prem
+-- USED IN: Scheduled by DB Event. Tracks End of Day average maintenance balance arrays. (AMB calculations for normal accounts).
+-- ============================================================
 DELIMITER $$
 CREATE PROCEDURE sp_record_daily_snapshots()
 BEGIN
@@ -721,7 +831,11 @@ BEGIN
 END$$
 DELIMITER ;
 
--- STORED PROCEDURE: sp_calculate_amb_penalties
+-- ============================================================
+-- STORED PROCEDURE: sp_calculate_amb_penalties 
+-- CONTRIBUTOR: Prem
+-- USED IN: Scheduled monthly by a DB event. Deduct ₹200 logically if accounts fall under their minimum threshold limit without triggering overdraw.
+-- ============================================================
 -- End-of-month batch: calculates AMB for each standard savings account.
 -- Deducts ₹200 penalty only if AMB < min_balance AND balance > ₹0.
 -- RBI Rule: penalty capped at current balance so balance never goes negative.
@@ -815,7 +929,16 @@ BEGIN
 END$$
 DELIMITER ;
 
--- EVENT: evt_nightly_snapshot (captures closing balance every night at 23:59)
+-- ✖️ END OF PREM'S AMB PENALTIES PROCEDURE ✖️
+-- ============================================================
+
+-- ============================================================
+-- EVENT: evt_nightly_snapshot & evt_monthly_amb_penalty
+-- CONTRIBUTOR: Ashraf (Backend Database Architecture Engine)
+-- SQL CONCEPT: Event Scheduler (Cron-like DB Tasks)
+-- INFO: CREATE EVENT allows scheduled execution of maintenance procedures mechanically based on time intervals natively in DB.
+-- USED IN: Scheduled tasks handled by SQL dynamically behind the scenes. 
+-- ============================================================
 DROP EVENT IF EXISTS evt_nightly_snapshot;
 DELIMITER $$
 CREATE EVENT evt_nightly_snapshot
@@ -833,9 +956,14 @@ STARTS (DATE_FORMAT(CURRENT_DATE + INTERVAL 1 MONTH, '%Y-%m-01') + INTERVAL 5 MI
 DO CALL sp_calculate_amb_penalties()$$
 DELIMITER ;
 
+-- ✖️ END OF PREM'S DYNAMIC EVENTS CONTRIBUTION ✖️
+-- ============================================================
+
 -- Seed initial snapshot so AMB calculation has data from day one
 CALL sp_record_daily_snapshots();
 
+-- SQL CONCEPT: CHECK Constraints
+-- INFO: Enforces domain rules strictly (e.g. amount > 0) rejecting invalid inserts at the engine level.
 -- 2. New Table: Loans
 CREATE TABLE Loans (
     loan_id          INT             AUTO_INCREMENT KEY,
@@ -888,7 +1016,16 @@ INSERT INTO AutoPay (account_id, merchant_name, amount, next_due_date, status) V
 (@acc1, 'Amazon Prime', 1499.00, DATE_ADD(CURRENT_DATE, INTERVAL 15 DAY), 'Active'),
 (@acc2, 'Office Rent', 15000.00, DATE_ADD(CURRENT_DATE, INTERVAL 1 DAY), 'Cancelled');
 
+-- ✖️ END OF GANESH'S LOANS & AUTOPAY TABLES CONTRIBUTION ✖️
+-- ============================================================
 
+-- ============================================================
+-- STORED PROCEDURE: sp_process_daily_deductions
+-- CONTRIBUTOR: Ganesh
+-- USED IN: Used via DB events to verify loan deductions. Complete Cursor engine.
+-- ============================================================
+-- SQL CONCEPT: Database Cursors
+-- INFO: Cursors (DECLARE cur_loans CURSOR) fetch rows one by one for iterative script-like processing entirely within SQL.
 -- 4. The Core Execution Engine (Cursor-driven Macro)
 DROP PROCEDURE IF EXISTS sp_process_daily_deductions;
 DELIMITER $$
@@ -970,9 +1107,22 @@ BEGIN
 END$$
 DELIMITER ;
 
+-- ✖️ END OF MANGESH'S AND GANESH'S DAILY DEDUCTIONS PROCEDURE ✖️
+-- ============================================================
+
+-- ============================================================
+-- EVENT: evt_daily_deductions
+-- CONTRIBUTOR: Ashraf (Database Automation Subsystem)
+-- SQL CONCEPT: Engine Automation Task Routing
+-- INFO: Automatically wraps and binds time-based execution bounds to Ganesh's cursor logic.
+-- USED IN: Executed logically. Triggers the sp_process_daily_deductions logic automatically. 
+-- ============================================================
 -- 5. The Trigger (Event Scheduler Engine)
 DROP EVENT IF EXISTS evt_daily_deductions;
 CREATE EVENT evt_daily_deductions
 ON SCHEDULE EVERY 1 DAY STARTS (CURRENT_DATE + INTERVAL 1 DAY)
 DO CALL sp_process_daily_deductions();
+
+-- ✖️ END OF MANGESH'S EVENTS TRIGGER CONTRIBUTION ✖️
+-- ============================================================
 

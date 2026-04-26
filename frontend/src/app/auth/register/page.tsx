@@ -292,7 +292,7 @@ export default function RegisterPage() {
                         <div>
                           <label className="block text-xs font-semibold uppercase text-slate-400 mb-1.5">First Name</label>
                           <div className="relative">
-                            <input {...register("first_name")} className={inputBase} placeholder="e.g. Ashraf" />
+                            <input {...register("first_name")} className={inputBase} placeholder="e.g Ramesh" />
                             <FieldStatus valid={!errors.first_name && firstNameVal.length > 0} show={firstNameVal.length > 0} />
                           </div>
                           {errors.first_name && <p className="text-red-400 text-[11px] mt-1 flex items-center gap-1"><ShieldAlert className="w-3 h-3" />{errors.first_name.message}</p>}
@@ -300,7 +300,7 @@ export default function RegisterPage() {
                         <div>
                           <label className="block text-xs font-semibold uppercase text-slate-400 mb-1.5">Last Name</label>
                           <div className="relative">
-                            <input {...register("last_name")} className={inputBase} placeholder="e.g. Suhail" />
+                            <input {...register("last_name")} className={inputBase} placeholder="e.g. Sharma" />
                             <FieldStatus valid={!errors.last_name && lastNameVal.length > 0} show={lastNameVal.length > 0} />
                           </div>
                           {errors.last_name && <p className="text-red-400 text-[11px] mt-1 flex items-center gap-1"><ShieldAlert className="w-3 h-3" />{errors.last_name.message}</p>}
